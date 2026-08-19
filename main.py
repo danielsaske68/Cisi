@@ -200,10 +200,12 @@ class SiciManager:
             soup = BeautifulSoup(r.text, "html.parser")
             buttons = soup.find_all("button")
             
+            logger.info(f"Total botones encontrados en HTML: {len(buttons)}")
+
             for btn in buttons:
                 texto_btn = btn.get_text(separator=" ", strip=True).upper()
+                logger.info(f"Botón encontrado -> Texto: '{texto_btn}'")
                 
-                # Extraer números entre corchetes de forma flexible
                 match = re.search(r'\[\s*([\d\s\|]+)\s*\]', texto_btn)
                 if match:
                     num = match.group(1).strip()
@@ -216,7 +218,7 @@ class SiciManager:
                     elif "MENSAJES" in texto_btn:
                         contadores["mensajes"] = num.replace(" ", "")
 
-            logger.info(f"Contadores leídos de SICI: {contadores}")
+            logger.info(f"Contadores finales leídos: {contadores}")
             return contadores
         except Exception as e:
             logger.error(f"Error extrayendo contadores: {e}")
