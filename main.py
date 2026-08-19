@@ -161,7 +161,6 @@ class SiciManager:
 
     def login(self):
         try:
-            # Cargar la página de inicio para obtener cookies si las hubiera
             self.session.get(LOGIN_URL, timeout=10)
             
             payload = {
@@ -172,15 +171,15 @@ class SiciManager:
             
             r = self.session.post(LOGIN_URL, data=payload, timeout=15)
             
-            # Comprobamos si la petición fue exitosa (código 200) tras enviar el formulario
             if r.status_code == 200:
-                # Hacemos una prueba cargando la página principal para confirmar la sesión
                 test_r = self.session.get(PRINCIPAL_URL, timeout=10)
-                # Si nos deja ver el panel y no nos patea al login, ¡estamos dentro!
                 if "login" not in test_r.url.lower():
                     logger.info("Login en SICI exitoso.")
                     return True
             logger.warning("El login en SICI no ha devuelto la sesión esperada.")
+            return False
+        except Exception as e:
+            logger.error(f"Excepción en login SICI: {e}")
             return False
 
     def obtener_contadores_y_seccion(self, tipo):
@@ -193,11 +192,7 @@ class SiciManager:
             
             soup = BeautifulSoup(r.text, "html.parser")
             
-            # Extraer contadores generales si se pide resumen
             if tipo == "RESUMEN":
-                texto_resumen = "📊 <b>ESTADO ACTUAL DEL PANEL SICI</b>\n\n"
-                # Buscamos los bloques de texto o contenedores
-                divs = soup.find_all("div", class_="") # Adaptable según estructura
                 return f"✅ Sesión activa correctamente.\n\nRevisa las opciones del menú para consultar Citas, Caducados, Pendientes o Mensajes."
 
             return f"📂 Contenido de <b>{tipo}</b> obtenido correctamente desde el panel."
