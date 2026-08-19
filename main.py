@@ -172,17 +172,15 @@ class SiciManager:
             
             r = self.session.post(LOGIN_URL, data=payload, timeout=15)
             
-            # Comprobamos si entramos al panel buscando el nombre o la ruta principal
-            if "principalOperarios" in r.url or "JHONATAN" in r.text.upper() or r.status_code == 200:
-                # Verificación extra cargando la principal
+            # Comprobamos si la petición fue exitosa (código 200) tras enviar el formulario
+            if r.status_code == 200:
+                # Hacemos una prueba cargando la página principal para confirmar la sesión
                 test_r = self.session.get(PRINCIPAL_URL, timeout=10)
-                if "JHONATAN" in test_r.text.upper() or "CITAS" in test_r.text.upper():
+                # Si nos deja ver el panel y no nos patea al login, ¡estamos dentro!
+                if "login" not in test_r.url.lower():
                     logger.info("Login en SICI exitoso.")
                     return True
             logger.warning("El login en SICI no ha devuelto la sesión esperada.")
-            return False
-        except Exception as e:
-            logger.error(f"Excepción en login SICI: {e}")
             return False
 
     def obtener_contadores_y_seccion(self, tipo):
