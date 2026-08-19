@@ -189,39 +189,38 @@ class SiciManager:
             return False
 
     def obtener_datos_panel(self):
+        contadores = {"citas": "0", "caducados": "0", "pendiente": "0", "mensajes": "0"}
         try:
             r = self.session.get(PRINCIPAL_URL, timeout=15)
             if "login" in r.url.lower() or "ENTRAR" in r.text:
                 if not self.login():
-                    return None
+                    return contadores
                 r = self.session.get(PRINCIPAL_URL, timeout=15)
             
             soup = BeautifulSoup(r.text, "html.parser")
+            buttons = soup.find_all("button")
             
-            # Extraer contadores buscando en los botones principales
-            contadores = {"citas": "?", "caducados": "?", "pendiente": "?", "mensajes": "?"}
-            
-            buttons = soup.find_all("button", class_="botonPrincipal")
             for btn in buttons:
                 texto_btn = btn.get_text(separator=" ", strip=True).upper()
-                # Extraer número entre corchetes o texto
-                match = re.search(r'\[\s*([\d\s\|]+)\s*\]', texto_btn)
-                num = match.group(1).strip() if match else "0"
                 
-                if "CITAS" in texto_btn and "CADUCADOS" not in texto_btn and "PENDIENTE" not in texto_btn:
-                    contadores["citas"] = num
-                elif "CADUCADOS" in texto_btn:
-                    contadores["caducados"] = num
-                elif "PENDIENTE" in texto_btn:
-                    contadores["pendiente"] = num
-                elif "MENSAJES" in texto_btn:
-                    contadores["mensajes"] = num
+                # Extraer números entre corchetes de forma flexible
+                match = re.search(r'\[\s*([\d\s\|]+)\s*\]', texto_btn)
+                if match:
+                    num = match.group(1).strip()
+                    if "CITAS" in texto_btn and "CADUCADOS" not in texto_btn and "PENDIENTE" not in texto_btn:
+                        contadores["citas"] = num
+                    elif "CADUCADOS" in texto_btn:
+                        contadores["caducados"] = num
+                    elif "PENDIENTE" in texto_btn:
+                        contadores["pendiente"] = num
+                    elif "MENSAJES" in texto_btn:
+                        contadores["mensajes"] = num.replace(" ", "")
 
+            logger.info(f"Contadores leídos de SICI: {contadores}")
             return contadores
         except Exception as e:
             logger.error(f"Error extrayendo contadores: {e}")
-            return None
-
+            return contadores
 sici = SiciManager()
 
 # =========================================================
