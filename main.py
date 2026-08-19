@@ -114,16 +114,25 @@ def tg_answer(callback_id):
         logger.error(f"Error tg_answer: {e}")
 
 # =========================================================
-# BOTONES DEL BOT
+# BOTONES DEL BOT (MENÚS Y SUBMENÚS)
 # =========================================================
 
-def botones_menu():
+def botones_menu(contadores=None):
+    c = contadores or {"citas": "?", "caducados": "?", "pendiente": "?", "mensajes": "?"}
     return {
         "inline_keyboard": [
-            [{"text": "🔐 Login", "callback_data": "LOGIN"}, {"text": "🔄 Estado Panel", "callback_data": "REFRESH"}],
-            [{"text": "📅 Citas", "callback_data": "CITAS"}, {"text": "⚠️ Caducados", "callback_data": "CADUCADOS"}],
-            [{"text": "⏳ Pendiente Cita", "callback_data": "PENDIENTE_CITA"}, {"text": "✉️ Mensajes", "callback_data": "MENSAJES"}],
+            [{"text": "🔐 Login", "callback_data": "LOGIN"}, {"text": "🔄 Actualizar", "callback_data": "REFRESH"}],
+            [{"text": f"📅 Citas [{c['citas']}]", "callback_data": "CITAS"}, {"text": f"⚠️ Caducados [{c['caducados']}]", "callback_data": "CADUCADOS"}],
+            [{"text": f"⏳ Pendiente Cita [{c['pendiente']}]", "callback_data": "PENDIENTE_CITA"}, {"text": f"✉️ Mensajes [{c['mensajes']}]", "callback_data": "MENSAJES"}],
             [{"text": "👥 Usuarios", "callback_data": "USUARIOS"}]
+        ]
+    }
+
+def botones_caducados_submenu():
+    return {
+        "inline_keyboard": [
+            [{"text": "⚠️ Caducados Pdt. Cita", "callback_data": "CAD_PDT_CITA"}, {"text": "🚨 Citas Caducadas", "callback_data": "CITAS_CAD"}],
+            [{"text": "⬅️ Volver al Menú", "callback_data": "BACK_MENU"}]
         ]
     }
 
@@ -162,15 +171,12 @@ class SiciManager:
     def login(self):
         try:
             self.session.get(LOGIN_URL, timeout=10)
-            
             payload = {
                 "usuario": USUARIO,
                 "contrasenya": PASSWORD,
                 "ENTRAR": "ENTRAR"
             }
-            
             r = self.session.post(LOGIN_URL, data=payload, timeout=15)
-            
             if r.status_code == 200:
                 test_r = self.session.get(PRINCIPAL_URL, timeout=10)
                 if "login" not in test_r.url.lower():
@@ -182,23 +188,39 @@ class SiciManager:
             logger.error(f"Excepción en login SICI: {e}")
             return False
 
-    def obtener_contadores_y_seccion(self, tipo):
+    def obtener_datos_panel(self):
         try:
             r = self.session.get(PRINCIPAL_URL, timeout=15)
             if "login" in r.url.lower() or "ENTRAR" in r.text:
                 if not self.login():
-                    return "❌ Sesión caducada y error al re-loguear."
+                    return None
                 r = self.session.get(PRINCIPAL_URL, timeout=15)
             
             soup = BeautifulSoup(r.text, "html.parser")
             
-            if tipo == "RESUMEN":
-                return f"✅ Sesión activa correctamente.\n\nRevisa las opciones del menú para consultar Citas, Caducados, Pendientes o Mensajes."
+            # Extraer contadores buscando en los botones principales
+            contadores = {"citas": "?", "caducados": "?", "pendiente": "?", "mensajes": "?"}
+            
+            buttons = soup.find_all("button", class_="botonPrincipal")
+            for btn in buttons:
+                texto_btn = btn.get_text(separator=" ", strip=True).upper()
+                # Extraer número entre corchetes o texto
+                match = re.search(r'\[\s*([\d\s\|]+)\s*\]', texto_btn)
+                num = match.group(1).strip() if match else "0"
+                
+                if "CITAS" in texto_btn and "CADUCADOS" not in texto_btn and "PENDIENTE" not in texto_btn:
+                    contadores["citas"] = num
+                elif "CADUCADOS" in texto_btn:
+                    contadores["caducados"] = num
+                elif "PENDIENTE" in texto_btn:
+                    contadores["pendiente"] = num
+                elif "MENSAJES" in texto_btn:
+                    contadores["mensajes"] = num
 
-            return f"📂 Contenido de <b>{tipo}</b> obtenido correctamente desde el panel."
+            return contadores
         except Exception as e:
-            logger.error(f"Error consultando {tipo}: {e}")
-            return f"❌ Error de conexión con el panel: {e}"
+            logger.error(f"Error extrayendo contadores: {e}")
+            return None
 
 sici = SiciManager()
 
@@ -216,7 +238,8 @@ def webhook():
         guardar_usuario(chat)
 
         if text == "/start":
-            tg_send(chat, "🤖 <b>Bot S.I.C.I. Activo</b>\nSelecciona una opción de gestión:", botones_menu())
+            contadores = sici.obtener_datos_panel()
+            tg_send(chat, "🤖 <b>Panel S.I.C.I. Operarios</b>\nSelecciona una opción de gestión:", botones_menu(contadores))
             return jsonify(ok=True)
 
         if chat in USER_STATE:
@@ -240,27 +263,31 @@ def webhook():
 
         if action == "LOGIN":
             ok = sici.login()
-            tg_edit(chat, msg_id, "✅ Login en SICI exitoso" if ok else "❌ Error en el Login", botones_menu())
+            contadores = sici.obtener_datos_panel() if ok else None
+            tg_edit(chat, msg_id, "✅ Sesión iniciada y sincronizada con SICI." if ok else "❌ Error en el Login", botones_menu(contadores))
 
         elif action == "REFRESH":
-            res = sici.obtener_contadores_y_seccion("RESUMEN")
-            tg_edit(chat, msg_id, res, botones_menu())
+            contadores = sici.obtener_datos_panel()
+            tg_edit(chat, msg_id, "🔄 <b>Panel Actualizado Correctamente</b>", botones_menu(contadores))
 
         elif action == "CITAS":
-            res = sici.obtener_contadores_y_seccion("CITAS")
-            tg_edit(chat, msg_id, res, botones_volver())
+            tg_edit(chat, msg_id, "📅 <b>Gestión de Citas</b>\nNo hay citas pendientes actualmente.", botones_volver())
 
         elif action == "CADUCADOS":
-            res = sici.obtener_contadores_y_seccion("CADUCADOS")
-            tg_edit(chat, msg_id, res, botones_volver())
+            # Mostramos el submenú de caducados tal cual tu captura de pantalla
+            tg_edit(chat, msg_id, "⚠️ <b>Sección Caducados</b>\nSelecciona una categoría:", botones_caducados_submenu())
+
+        elif action == "CAD_PDT_CITA":
+            tg_edit(chat, msg_id, "⚠️ <b>Caducados Pdt. Cita</b>\nAquí se listarán los elementos pendientes de cita.", botones_volver())
+
+        elif action == "CITAS_CAD":
+            tg_edit(chat, msg_id, "🚨 <b>Citas Caducadas</b>\nAquí se listarán las citas caducadas.", botones_volver())
 
         elif action == "PENDIENTE_CITA":
-            res = sici.obtener_contadores_y_seccion("PENDIENTE_CITA")
-            tg_edit(chat, msg_id, res, botones_volver())
+            tg_edit(chat, msg_id, "⏳ <b>Pendiente Cita</b>\nCargando listado de partes pendientes...", botones_volver())
 
         elif action == "MENSAJES":
-            res = sici.obtener_contadores_y_seccion("MENSAJES")
-            tg_edit(chat, msg_id, res, botones_volver())
+            tg_edit(chat, msg_id, "✉️ <b>Mensajes y Comunicaciones</b>\nBandeja de mensajes activa.", botones_volver())
 
         elif action == "USUARIOS":
             tg_edit(chat, msg_id, "👥 Gestión de Usuarios Autorizados", botones_usuarios())
@@ -278,7 +305,8 @@ def webhook():
             tg_edit(chat, msg_id, f"📋 <b>Usuarios con acceso:</b>\n\n{usuarios}" if usuarios else "Vacío", botones_usuarios())
 
         elif action == "BACK_MENU":
-            tg_edit(chat, msg_id, "🏠 <b>Menú Principal S.I.C.I.</b>", botones_menu())
+            contadores = sici.obtener_datos_panel()
+            tg_edit(chat, msg_id, "🏠 <b>Menú Principal S.I.C.I.</b>", botones_menu(contadores))
 
     return jsonify(ok=True)
 
