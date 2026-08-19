@@ -153,7 +153,7 @@ def botones_usuarios():
     }
 
 # =========================================================
-# CLASE SICI SCRAPER & MANAGER (CON TOKEN DINÁMICO)
+# CLASE SICI SCRAPER & MANAGER (LOGIN ROBUSTO)
 # =========================================================
 
 class SiciManager:
@@ -171,12 +171,25 @@ class SiciManager:
 
     def login(self):
         try:
-            self.session.get(LOGIN_URL, timeout=10)
-            payload = {
-                "usuario": USUARIO,
-                "contrasenya": PASSWORD,
-                "ENTRAR": "ENTRAR"
-            }
+            # 1. Obtener la página de login para capturar cookies y campos ocultos del formulario
+            r_get = self.session.get(LOGIN_URL, timeout=10)
+            soup = BeautifulSoup(r_get.text, "html.parser")
+            
+            form = soup.find("form")
+            payload = {}
+            if form:
+                for input_tag in form.find_all("input"):
+                    name = input_tag.get("name")
+                    value = input_tag.get("value", "")
+                    if name:
+                        payload[name] = value
+
+            # Asegurar credenciales y botón de entrada
+            payload["usuario"] = USUARIO
+            payload["contrasenya"] = PASSWORD
+            payload["ENTRAR"] = "ENTRAR"
+
+            # 2. Enviar POST de login
             r = self.session.post(LOGIN_URL, data=payload, timeout=15, allow_redirects=True)
             
             if "principaloperarios.php" in r.url.lower() and "login" not in r.url.lower():
@@ -184,6 +197,13 @@ class SiciManager:
                 logger.info(f"Login en SICI exitoso. URL con token capturada: {r.url}")
                 return True
             
+            # Comprobación alternativa por si la redirección directa falló pero la cookie es válida
+            test_r = self.session.get(PRINCIPAL_URL, timeout=10)
+            if "principaloperarios.php" in test_r.url.lower() and "login" not in test_r.url.lower():
+                self.current_principal_url = test_r.url
+                logger.info(f"Sesión activa detectada mediante test. URL: {test_r.url}")
+                return True
+
             logger.warning(f"El login no redirigió correctamente. URL actual: {r.url}")
             return False
         except Exception as e:
