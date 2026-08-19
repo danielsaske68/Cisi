@@ -118,7 +118,7 @@ def tg_answer(callback_id):
 # =========================================================
 
 def botones_menu(contadores=None):
-    c = contadores or {"citas": "?", "caducados": "?", "pendiente": "?", "mensajes": "?"}
+    c = contadores or {"citas": "0", "caducados": "0", "pendiente": "0", "mensajes": "0"}
     return {
         "inline_keyboard": [
             [{"text": "🔐 Login", "callback_data": "LOGIN"}, {"text": "🔄 Actualizar", "callback_data": "REFRESH"}],
@@ -153,7 +153,7 @@ def botones_usuarios():
     }
 
 # =========================================================
-# CLASE SICI SCRAPER & MANAGER
+# CLASE SICI SCRAPER & MANAGER (CON TOKEN DINÁMICO)
 # =========================================================
 
 class SiciManager:
@@ -167,6 +167,7 @@ class SiciManager:
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], raise_on_status=False)
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount("https://", adapter)
+        self.current_principal_url = PRINCIPAL_URL
 
     def login(self):
         try:
@@ -176,13 +177,14 @@ class SiciManager:
                 "contrasenya": PASSWORD,
                 "ENTRAR": "ENTRAR"
             }
-            r = self.session.post(LOGIN_URL, data=payload, timeout=15)
-            if r.status_code == 200:
-                test_r = self.session.get(PRINCIPAL_URL, timeout=10)
-                if "login" not in test_r.url.lower():
-                    logger.info("Login en SICI exitoso.")
-                    return True
-            logger.warning("El login en SICI no ha devuelto la sesión esperada.")
+            r = self.session.post(LOGIN_URL, data=payload, timeout=15, allow_redirects=True)
+            
+            if "principaloperarios.php" in r.url.lower() and "login" not in r.url.lower():
+                self.current_principal_url = r.url
+                logger.info(f"Login en SICI exitoso. URL con token capturada: {r.url}")
+                return True
+            
+            logger.warning(f"El login no redirigió correctamente. URL actual: {r.url}")
             return False
         except Exception as e:
             logger.error(f"Excepción en login SICI: {e}")
@@ -191,21 +193,17 @@ class SiciManager:
     def obtener_datos_panel(self):
         contadores = {"citas": "0", "caducados": "0", "pendiente": "0", "mensajes": "0"}
         try:
-            r = self.session.get(PRINCIPAL_URL, timeout=15)
+            r = self.session.get(self.current_principal_url, timeout=15)
             if "login" in r.url.lower() or "ENTRAR" in r.text:
                 if not self.login():
                     return contadores
-                r = self.session.get(PRINCIPAL_URL, timeout=15)
+                r = self.session.get(self.current_principal_url, timeout=15)
             
             soup = BeautifulSoup(r.text, "html.parser")
             buttons = soup.find_all("button")
             
-            logger.info(f"Total botones encontrados en HTML: {len(buttons)}")
-
             for btn in buttons:
                 texto_btn = btn.get_text(separator=" ", strip=True).upper()
-                logger.info(f"Botón encontrado -> Texto: '{texto_btn}'")
-                
                 match = re.search(r'\[\s*([\d\s\|]+)\s*\]', texto_btn)
                 if match:
                     num = match.group(1).strip()
@@ -218,11 +216,12 @@ class SiciManager:
                     elif "MENSAJES" in texto_btn:
                         contadores["mensajes"] = num.replace(" ", "")
 
-            logger.info(f"Contadores finales leídos: {contadores}")
+            logger.info(f"Contadores leídos correctamente: {contadores}")
             return contadores
         except Exception as e:
             logger.error(f"Error extrayendo contadores: {e}")
             return contadores
+
 sici = SiciManager()
 
 # =========================================================
@@ -275,14 +274,13 @@ def webhook():
             tg_edit(chat, msg_id, "📅 <b>Gestión de Citas</b>\nNo hay citas pendientes actualmente.", botones_volver())
 
         elif action == "CADUCADOS":
-            # Mostramos el submenú de caducados tal cual tu captura de pantalla
             tg_edit(chat, msg_id, "⚠️ <b>Sección Caducados</b>\nSelecciona una categoría:", botones_caducados_submenu())
 
         elif action == "CAD_PDT_CITA":
-            tg_edit(chat, msg_id, "⚠️ <b>Caducados Pdt. Cita</b>\nAquí se listarán los elementos pendientes de cita.", botones_volver())
+            tg_edit(chat, msg_id, "⚠️ <b>Caducados Pdt. Cita</b>\nListado de elementos pendientes de cita.", botones_volver())
 
         elif action == "CITAS_CAD":
-            tg_edit(chat, msg_id, "🚨 <b>Citas Caducadas</b>\nAquí se listarán las citas caducadas.", botones_volver())
+            tg_edit(chat, msg_id, "🚨 <b>Citas Caducadas</b>\nListado de citas caducadas.", botones_volver())
 
         elif action == "PENDIENTE_CITA":
             tg_edit(chat, msg_id, "⏳ <b>Pendiente Cita</b>\nCargando listado de partes pendientes...", botones_volver())
