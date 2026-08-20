@@ -1,3 +1,4 @@
 #!/bin/bash
+playwright install-deps chromium
 playwright install chromium
 gunicorn main:app --bind 0.0.0.0:$PORT --workers 1 --capture-output --log-level info
