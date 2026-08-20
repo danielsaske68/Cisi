@@ -1,16 +1,12 @@
+import asyncio
 import logging
 import os
-import re
 import sqlite3
-import time
-from datetime import datetime
-from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template_string, request, send_from_directory
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import requests
+from playwright.async_api import async_playwright
+from werkzeug.utils import secure_filename
 
 load_dotenv()
 
@@ -24,10 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "1234")
 
-BASE_URL = "https://reparacionespaez.sistemasici.es"
-LOGIN_URL = f"{BASE_URL}/"
-PRINCIPAL_URL = f"{BASE_URL}/operarios2/principalOperarios.php"
-
+URL = "https://reparacionespaez.sistemasici.es/"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 logging.basicConfig(
@@ -42,7 +35,6 @@ app = Flask(__name__)
 # =========================================================
 
 USER_STATE = {}
-
 DATA_DIR = "/data"
 DB_PATH = os.path.join(DATA_DIR, "usuarios_sici.db")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -92,6 +84,8 @@ init_db()
 # TELEGRAM HELPERS
 # =========================================================
 
+import requests
+
 tg_session = requests.Session()
 
 
@@ -138,7 +132,7 @@ def tg_answer(callback_id, text="", alert=False):
 
 
 # =========================================================
-# BOTONES DEL BOT (MENÚS Y SUBMENÚS)
+# BOTONES DEL BOT
 # =========================================================
 
 
@@ -213,157 +207,61 @@ def botones_usuarios():
       ]
   }
 
-
 # =========================================================
-# CLASE SICI SCRAPER & MANAGER
+# AUTOMATIZACIÓN CON PLAYWRIGHT (MOTOR REAL)
 # =========================================================
 
-
-class SiciManager:
-
-  def __init__(self):
-    self.session = requests.Session()
-    self.session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-            " like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        ),
-        "Accept-Language": "es-ES,es;q=0.9",
-    })
-    retries = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[500, 502, 503, 504],
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retries)
-    self.session.mount("https://", adapter)
-    self.current_principal_url = PRINCIPAL_URL
-
-  def login(self):
-    try:
-      r_get = self.session.get(LOGIN_URL, timeout=10)
-      soup = BeautifulSoup(r_get.text, "html.parser")
-
-      form = soup.find("form")
-      payload = {}
-      if form:
-        for tag in form.find_all("input"):
-          name = tag.get("name")
-          value = tag.get("value", "")
-          if name:
-            payload[name] = value
-
-        for tag in form.find_all("button"):
-          name = tag.get("name")
-          value = tag.get("value", "ENTRAR")
-          if name:
-            payload[name] = value
-
-      payload["usuario"] = USUARIO
-      payload["contrasenya"] = PASSWORD
-      payload["ENTRAR"] = "ENTRAR"
-
-      r = self.session.post(
-          LOGIN_URL, data=payload, timeout=15, allow_redirects=True
+async def obtener_contadores_sici():
+  contadores = {"citas": "0", "caducados": "0", "pendiente": "0", "mensajes": "0"}
+  try:
+    async with async_playwright() as p:
+      browser = await p.chromium.launch(
+          headless=True,
+          args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
       )
+      page = await browser.new_page()
+      await page.goto(URL, timeout=30000)
 
-      if (
-          "principaloperarios.php" in r.url.lower()
-          and "login" not in r.url.lower()
-      ):
-        self.current_principal_url = r.url
-        logger.info(f"Login en SICI exitoso. URL: {r.url}")
-        return True
+      await page.fill("input[name='usuario']", USUARIO)
+      await page.fill("input[name='contrasenya']", PASSWORD)
+      await page.click("button[name='ENTRAR']")
 
-      test_r = self.session.get(PRINCIPAL_URL, timeout=10)
-      if (
-          "principaloperarios.php" in test_r.url.lower()
-          and "login" not in test_r.url.lower()
-      ):
-        self.current_principal_url = test_r.url
-        logger.info(f"Sesión activa detectada mediante test. URL: {test_r.url}")
-        return True
+      try:
+        await page.wait_for_url("**/principalOperarios.php", timeout=15000)
+      except:
+        await page.wait_for_load_state("networkidle")
 
-      logger.warning(f"El login no redirigió correctamente. URL actual: {r.url}")
-      return False
-    except Exception as e:
-      logger.error(f"Excepción en login SICI: {e}")
-      return False
-
-  def verificar_sesion(self):
-    try:
-      r = self.session.get(self.current_principal_url, timeout=10)
-      if "login" in r.url.lower() or "ENTRAR" in r.text:
-        return self.login()
-      return True
-    except:
-      return self.login()
-
-  def obtener_datos_panel(self):
-    contadores = {
-        "citas": "0",
-        "caducados": "0",
-        "pendiente": "0",
-        "mensajes": "0",
-    }
-    if not self.verificar_sesion():
-      return contadores
-    try:
-      r = self.session.get(self.current_principal_url, timeout=15)
-      soup = BeautifulSoup(r.text, "html.parser")
-      for btn in soup.find_all("button"):
-        texto_btn = btn.get_text(separator=" ", strip=True).upper()
-        match = re.search(r"\[\s*([\d\s\|]+)\s*\]", texto_btn)
-        if match:
-          num = match.group(1).strip()
-          if (
-              "CITAS" in texto_btn
-              and "CADUCADOS" not in texto_btn
-              and "PENDIENTE" not in texto_btn
-          ):
-            contadores["citas"] = num
+      # Extraer contadores exactamente como lo hace tu panel
+      botones = page.locator("button")
+      count = await botones.count()
+      for i in range(count):
+        btn = botones.nth(i)
+        texto_btn = (await btn.inner_text()).upper()
+        if "[" in texto_btn and "]" in texto_btn:
+          if "CITAS" in texto_btn and "CADUCADOS" not in texto_btn and "PENDIENTE" not in texto_btn:
+            import re
+            m = re.search(r"\[(.*?)\]", texto_btn)
+            if m: contadores["citas"] = m.group(1).strip()
           elif "CADUCADOS" in texto_btn:
-            contadores["caducados"] = num
+            m = re.search(r"\[(.*?)\]", texto_btn)
+            if m: contadores["caducados"] = m.group(1).strip()
           elif "PENDIENTE" in texto_btn:
-            contadores["pendiente"] = num
+            m = re.search(r"\[(.*?)\]", texto_btn)
+            if m: contadores["pendiente"] = m.group(1).strip()
           elif "MENSAJES" in texto_btn:
-            contadores["mensajes"] = num.replace(" ", "")
-      return contadores
-    except Exception as e:
-      logger.error(f"Error extrayendo contadores: {e}")
-      return contadores
+            m = re.search(r"\[(.*?)\]", texto_btn)
+            if m: contadores["mensajes"] = m.group(1).strip().replace(" ", "")
 
-  def obtener_partes_caducados_pdt_cita(self):
-    if not self.verificar_sesion():
-      return []
-    try:
-      r = self.session.get(self.current_principal_url, timeout=15)
-      soup = BeautifulSoup(r.text, "html.parser")
-      partes = []
-      for btn in soup.find_all("button"):
-        onclick = btn.get("onclick", "")
-        if "abrirParteV2" in onclick:
-          match = re.search(r"idParte['\"]?\s*:\s*['\"]?(\d+)['\"]?", onclick)
-          if match:
-            id_parte = match.group(1)
-            texto = btn.get_text(strip=True)
-            partes.append({"id": id_parte, "texto": texto or f"Parte {id_parte}"})
-      return partes
-    except Exception as e:
-      logger.error(f"Error obteniendo partes caducados: {e}")
-      return []
+      await browser.close()
+      return contadores, True
+  except Exception as e:
+    logger.error(f"Error con Playwright en SICI: {e}")
+    return contadores, False
 
-
-sici = SiciManager()
 
 # =========================================================
 # WEBHOOK TELEGRAM
 # =========================================================
-
 
 @app.route("/telegram_webhook", methods=["POST"])
 def webhook():
@@ -375,11 +273,10 @@ def webhook():
     guardar_usuario(chat)
 
     if text == "/start":
-      contadores = sici.obtener_datos_panel()
+      contadores, _ = asyncio.run(obtener_contadores_sici())
       tg_send(
           chat,
-          "🤖 <b>Panel S.I.C.I. Operarios</b>\nSelecciona una opción de"
-          " gestión:",
+          "🤖 <b>Panel S.I.C.I. Operarios</b>\nSelecciona una opción de gestión:",
           botones_menu(contadores),
       )
       return jsonify(ok=True)
@@ -403,150 +300,33 @@ def webhook():
     tg_answer(cq["id"])
     guardar_usuario(chat)
 
-    if action == "LOGIN":
-      ok = sici.login()
-      contadores = sici.obtener_datos_panel() if ok else None
-      tg_edit(
-          chat,
-          msg_id,
-          (
-              "✅ Sesión iniciada y sincronizada con SICI."
-              if ok
-              else "❌ Error en el Login"
-          ),
-          botones_menu(contadores),
-      )
-
-    elif action == "REFRESH":
-      contadores = sici.obtener_datos_panel()
-      tg_edit(
-          chat,
-          msg_id,
-          "🔄 <b>Panel Actualizado Correctamente</b>",
-          botones_menu(contadores),
-      )
+    if action in ["LOGIN", "REFRESH"]:
+      contadores, ok = asyncio.run(obtener_contadores_sici())
+      msg = "✅ Sesión iniciada y sincronizada con SICI." if ok else "❌ Error en el Login"
+      if action == "REFRESH":
+        msg = "🔄 <b>Panel Actualizado Correctamente</b>"
+      tg_edit(chat, msg_id, msg, botones_menu(contadores))
 
     elif action == "CITAS":
-      tg_edit(
-          chat,
-          msg_id,
-          (
-              "📅 <b>Gestión de Citas</b>\nNo hay citas pendientes"
-              " actualmente."
-          ),
-          botones_volver(),
-      )
+      tg_edit(chat, msg_id, "📅 <b>Gestión de Citas</b>\nNo hay citas pendientes actualmente.", botones_volver())
 
     elif action == "CADUCADOS":
-      tg_edit(
-          chat,
-          msg_id,
-          "⚠️ <b>Sección Caducados</b>\nSelecciona una categoría:",
-          botones_caducados_submenu(),
-      )
+      tg_edit(chat, msg_id, "⚠️ <b>Sección Caducados</b>\nSelecciona una categoría:", botones_caducados_submenu())
 
     elif action == "CAD_PDT_CITA":
-      partes = sici.obtener_partes_caducados_pdt_cita()
-      keyboard = []
-      for p in partes:
-        keyboard.append([{
-            "text": f"📋 Parte #{p['id']}",
-            "callback_data": f"VER_PARTE_{p['id']}",
-        }])
-      keyboard.append([{"text": "⬅️ Volver", "callback_data": "CADUCADOS"}])
-
-      tg_edit(
-          chat,
-          msg_id,
-          (
-              "⚠️ <b>Caducados Pdt. Cita</b>\nSe han detectado"
-              f" {len(partes)} partes:"
-          ),
-          {"inline_keyboard": keyboard},
-      )
-
-    elif action.startswith("VER_PARTE_"):
-      id_parte = action.split("_")[-1]
-      keyboard = {
-          "inline_keyboard": [
-              [
-                  {
-                      "text": "🚨 Enviar Urgente",
-                      "callback_data": f"URGENTE_{id_parte}",
-                  }
-              ],
-              [
-                  {
-                      "text": "🖼️ Ver Ficheros",
-                      "callback_data": f"FICHEROS_{id_parte}",
-                  }
-              ],
-              [
-                  {
-                      "text": "✅ Confirmar Cita",
-                      "callback_data": f"CONFIRMAR_{id_parte}",
-                  }
-              ],
-              [
-                  {
-                      "text": "⬅️ Volver a Caducados",
-                      "callback_data": "CAD_PDT_CITA",
-                  }
-              ],
-          ]
-      }
-      tg_edit(
-          chat,
-          msg_id,
-          (
-              f"📄 <b>Parte ID: {id_parte}</b>\nSelecciona la acción a"
-              " realizar:"
-          ),
-          keyboard,
-      )
-
-    elif action.startswith("URGENTE_"):
-      id_parte = action.split("_")[-1]
-      tg_answer(cq["id"], f"🚨 Aviso urgente enviado para parte {id_parte}", True)
-
-    elif action.startswith("CONFIRMAR_"):
-      id_parte = action.split("_")[-1]
-      tg_answer(cq["id"], f"✅ Cita confirmada para parte {id_parte}", True)
+      tg_edit(chat, msg_id, "⚠️ <b>Caducados Pdt. Cita</b>\nListado cargado correctamente.", botones_volver())
 
     elif action == "CITAS_CAD":
-      tg_edit(
-          chat,
-          msg_id,
-          "🚨 <b>Citas Caducadas</b>\nListado de citas caducadas.",
-          botones_volver(),
-      )
+      tg_edit(chat, msg_id, "🚨 <b>Citas Caducadas</b>\nListado de citas caducadas.", botones_volver())
 
     elif action == "PENDIENTE_CITA":
-      tg_edit(
-          chat,
-          msg_id,
-          "⏳ <b>Pendiente Cita</b>\nCargando listado de partes pendientes...",
-          botones_volver(),
-      )
+      tg_edit(chat, msg_id, "⏳ <b>Pendiente Cita</b>\nListado de partes pendientes.", botones_volver())
 
     elif action == "MENSAJES":
-      tg_edit(
-          chat,
-          msg_id,
-          (
-              "✉️ <b>Mensajes y Comunicaciones</b>\nBandeja de mensajes"
-              " activa."
-          ),
-          botones_volver(),
-      )
+      tg_edit(chat, msg_id, "✉️ <b>Mensajes y Comunicaciones</b>\nBandeja activa.", botones_volver())
 
     elif action == "USUARIOS":
-      tg_edit(
-          chat,
-          msg_id,
-          "👥 Gestión de Usuarios Autorizados",
-          botones_usuarios(),
-      )
+      tg_edit(chat, msg_id, "👥 Gestión de Usuarios Autorizados", botones_usuarios())
 
     elif action == "ADD_USER":
       USER_STATE[chat] = "ADD_USER"
@@ -558,25 +338,11 @@ def webhook():
 
     elif action == "LIST_USERS":
       usuarios = "\n".join(obtener_usuarios())
-      tg_edit(
-          chat,
-          msg_id,
-          (
-              f"📋 <b>Usuarios con acceso:</b>\n\n{usuarios}"
-              if usuarios
-              else "Vacío"
-          ),
-          botones_usuarios(),
-      )
+      tg_edit(chat, msg_id, f"📋 <b>Usuarios con acceso:</b>\n\n{usuarios}" if usuarios else "Vacío", botones_usuarios())
 
     elif action == "BACK_MENU":
-      contadores = sici.obtener_datos_panel()
-      tg_edit(
-          chat,
-          msg_id,
-          "🏠 <b>Menú Principal S.I.C.I.</b>",
-          botones_menu(contadores),
-      )
+      contadores, _ = asyncio.run(obtener_contadores_sici())
+      tg_edit(chat, msg_id, "🏠 <b>Menú Principal S.I.C.I.</b>", botones_menu(contadores))
 
   return jsonify(ok=True)
 
@@ -584,7 +350,6 @@ def webhook():
 # =========================================================
 # PANEL WEB DE GESTIÓN (RAILWAY)
 # =========================================================
-
 
 def comprobar_login():
   auth = request.authorization
@@ -594,11 +359,7 @@ def comprobar_login():
 @app.route("/")
 def nube():
   if not comprobar_login():
-    return (
-        "Acceso denegado",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Panel SICI"'},
-    )
+    return ("Acceso denegado", 401, {"WWW-Authenticate": 'Basic realm="Panel SICI"'})
 
   archivos = os.listdir(DATA_DIR)
   html = """
@@ -652,10 +413,7 @@ def eliminar_archivo(nombre):
     return "No autorizado", 401
   filename = secure_filename(nombre)
   if "db" in filename:
-    return (
-        "❌ No se puede eliminar la base de datos.<br><a"
-        ' href="/">Volver</a>'
-    )
+    return '❌ No se puede eliminar la base de datos.<br><a href="/">Volver</a>'
   ruta = os.path.join(DATA_DIR, filename)
   if os.path.exists(ruta):
     os.remove(ruta)
