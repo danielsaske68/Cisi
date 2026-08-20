@@ -1,300 +1,123 @@
-import logging
+import asyncio
 import os
-import re
-import sqlite3
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template_string, request, send_from_directory
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import requests
-from werkzeug.utils import secure_filename
 
 load_dotenv()
 
-USUARIO = os.getenv("USUARIO")
-PASSWORD = os.getenv("PASSWORD")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "1234")
+USUARIO = os.getenv("USUARIO", "mauricio")
+PASSWORD = os.getenv("PASSWORD", "mauricio75")
+URL = "https://reparacionespaez.sistemasici.es/"
 
-BASE_URL = "https://reparacionespaez.sistemasici.es"
-LOGIN_URL = f"{BASE_URL}/"
-PRINCIPAL_URL = f"{BASE_URL}/operarios2/principalOperarios.php"
+async def ejecutar_bot():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
+        page = await browser.new_page()
 
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+        print("1. Accediendo a SICI...")
+        await page.goto(URL)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("bot_sici")
+        print("2. Iniciando sesión...")
+        await page.fill("input[name='usuario']", USUARIO)
+        await page.fill("input[name='contrasenya']", PASSWORD)
+        await page.click("button[name='ENTRAR']")
 
-app = Flask(__name__)
-
-USER_STATE = {}
-DATA_DIR = "/data"
-DB_PATH = os.path.join(DATA_DIR, "usuarios_sici.db")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    with get_db() as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS usuarios (chat_id TEXT PRIMARY KEY)")
-        conn.commit()
-
-def guardar_usuario(chat_id):
-    with get_db() as conn:
-        conn.execute("INSERT OR IGNORE INTO usuarios (chat_id) VALUES (?)", (str(chat_id),))
-        conn.commit()
-
-def obtener_usuarios():
-    with get_db() as conn:
-        cursor = conn.execute("SELECT chat_id FROM usuarios")
-        return [r["chat_id"] for r in cursor.fetchall()]
-
-def eliminar_usuario(chat_id):
-    with get_db() as conn:
-        conn.execute("DELETE FROM usuarios WHERE chat_id=?", (str(chat_id),))
-        conn.commit()
-
-init_db()
-
-tg_session = requests.Session()
-
-def tg_send(chat, text, markup=None):
-    payload = {"chat_id": chat, "text": text, "parse_mode": "HTML"}
-    if markup: payload["reply_markup"] = markup
-    try:
-        res = tg_session.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
-        data = res.json()
-        if data.get("ok"): return data["result"]["message_id"]
-    except Exception as e:
-        logger.error(f"Error tg_send: {e}")
-    return None
-
-def tg_edit(chat, msg_id, text, markup=None):
-    payload = {"chat_id": chat, "message_id": msg_id, "text": text, "parse_mode": "HTML"}
-    if markup: payload["reply_markup"] = markup
-    try:
-        tg_session.post(f"{TELEGRAM_API}/editMessageText", json=payload, timeout=10)
-    except Exception as e:
-        logger.error(f"Error tg_edit: {e}")
-
-def tg_answer(callback_id, text="", alert=False):
-    try:
-        tg_session.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": callback_id, "text": text, "show_alert": alert}, timeout=5)
-    except Exception as e:
-        logger.error(f"Error tg_answer: {e}")
-
-def botones_menu(contadores=None):
-    c = contadores or {"citas": "0", "caducados": "0", "pendiente": "0", "mensajes": "0"}
-    return {
-        "inline_keyboard": [
-            [{"text": "🔐 Login", "callback_data": "LOGIN"}, {"text": "🔄 Actualizar", "callback_data": "REFRESH"}],
-            [{"text": f"📅 Citas [{c['citas']}]", "callback_data": "CITAS"}, {"text": f"⚠️ Caducados [{c['caducados']}]", "callback_data": "CADUCADOS"}],
-            [{"text": f"⏳ Pendiente Cita [{c['pendiente']}]", "callback_data": "PENDIENTE_CITA"}, {"text": f"✉️ Mensajes [{c['mensajes']}]", "callback_data": "MENSAJES"}],
-            [{"text": "👥 Usuarios", "callback_data": "USUARIOS"}]
-        ]
-    }
-
-def botones_caducados_submenu():
-    return {
-        "inline_keyboard": [
-            [{"text": "⚠️ Caducados Pdt. Cita", "callback_data": "CAD_PDT_CITA"}, {"text": "🚨 Citas Caducadas", "callback_data": "CITAS_CAD"}],
-            [{"text": "⬅️ Volver al Menú", "callback_data": "BACK_MENU"}]
-        ]
-    }
-
-def botones_volver():
-    return {"inline_keyboard": [[{"text": "⬅️ Volver al Menú", "callback_data": "BACK_MENU"}]]}
-
-def botones_usuarios():
-    return {
-        "inline_keyboard": [
-            [{"text": "➕ Agregar", "callback_data": "ADD_USER"}, {"text": "🗑 Eliminar", "callback_data": "DEL_USER"}],
-            [{"text": "📋 Listar", "callback_data": "LIST_USERS"}],
-            [{"text": "⬅️ Volver", "callback_data": "BACK_MENU"}]
-        ]
-    }
-
-class SiciManager:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "es-ES,es;q=0.9",
-            "Referer": LOGIN_URL
-        })
-        retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], raise_on_status=False)
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-
-    def login(self):
         try:
-            # 1. Obtenemos la cookie de sesión inicial de SICI
-            r_get = self.session.get(LOGIN_URL, timeout=10)
-            soup = BeautifulSoup(r_get.text, "html.parser")
-            form = soup.find("form")
-            payload = {}
-            post_url = LOGIN_URL
-            
-            if form:
-                action = form.get("action")
-                if action:
-                    post_url = action if action.startswith("http") else f"{BASE_URL}/{action.lstrip('/')}"
-                for tag in form.find_all(["input", "button"]):
-                    name = tag.get("name")
-                    if name:
-                        payload[name] = tag.get("value", "")
+            await page.wait_for_url("**/principalOperarios.php", timeout=15000)
+        except:
+            await page.wait_for_load_state("networkidle")
 
-            # 2. Inyectamos credenciales exactas
-            payload["usuario"] = USUARIO
-            payload["contrasenya"] = PASSWORD
-            payload["ENTRAR"] = "ENTRAR"
+        print("✅ Login exitoso.")
 
-            # 3. Enviamos el POST con las cookies de la sesión activa
-            self.session.post(post_url, data=payload, timeout=15, allow_redirects=True)
-            
-            # 4. Comprobamos si ya podemos entrar al panel
-            test_r = self.session.get(PRINCIPAL_URL, timeout=10)
-            if "login" not in test_r.url.lower() and "ENTRAR" not in test_r.text:
-                logger.info("Login en SICI verificado con éxito.")
-                return True
-            
-            logger.warning(f"Login rechazado. URL: {test_r.url}")
-            return False
-        except Exception as e:
-            logger.error(f"Excepción en login SICI: {e}")
-            return False
+        print("3. Abriendo menú de CADUCADOS...")
+        caducados_btn = page.locator("button.btnCaducados").first
+        if await caducados_btn.count() > 0:
+            await caducados_btn.click()
+            await page.wait_for_timeout(2000)
 
-    def obtener_datos_panel(self):
-        contadores = {"citas": "0", "caducados": "0", "pendiente": "0", "mensajes": "0"}
+        print("4. Entrando en 'CADUCADOS PDT. CITA'...")
+        botones_menu = page.locator("button")
+        count = await botones_menu.count()
+        for i in range(count):
+            btn = botones_menu.nth(i)
+            texto = await btn.inner_text()
+            if "PDT. CITA" in texto.upper():
+                await btn.click()
+                break
+        
+        print("5. Esperando a que el servidor cargue la lista de expedientes...")
         try:
-            r = self.session.get(PRINCIPAL_URL, timeout=15)
-            if "login" in r.url.lower() or "ENTRAR" in r.text:
-                if not self.login():
-                    return contadores
-                r = self.session.get(PRINCIPAL_URL, timeout=15)
+            await page.locator("button.accordion-button").first.wait_for(timeout=15000)
+        except Exception:
+            print("⚠️ No se encontraron expedientes.")
+            await browser.close()
+            return
 
-            soup = BeautifulSoup(r.text, "html.parser")
-            for btn in soup.find_all("button"):
-                texto_btn = btn.get_text(separator=" ", strip=True).upper()
-                match = re.search(r"\[\s*([\d\s\|]+)\s*\]", texto_btn)
-                if match:
-                    num = match.group(1).strip()
-                    if "CITAS" in texto_btn and "CADUCADOS" not in texto_btn and "PENDIENTE" not in texto_btn:
-                        contadores["citas"] = num
-                    elif "CADUCADOS" in texto_btn:
-                        contadores["caducados"] = num
-                    elif "PENDIENTE" in texto_btn:
-                        contadores["pendiente"] = num
-                    elif "MENSAJES" in texto_btn:
-                        contadores["mensajes"] = num.replace(" ", "")
-            return contadores
+        total_partes = await page.evaluate("document.querySelectorAll(\"button[onclick*='abrirParteV2']\").length")
+        print(f"📋 ¡Se han detectado exactamente {total_partes} partes reales para procesar!")
+
+        for i in range(total_partes):
+            print(f"\n--- Procesando Parte #{i + 1} de {total_partes} ---")
+            
+            exito = await page.evaluate(f"""(index) => {{
+                let accordions = document.querySelectorAll("button.accordion-button");
+                if (accordions[index]) {{
+                    if (accordions[index].getAttribute("aria-expanded") !== "true") {{
+                        accordions[index].click();
+                    }}
+                }}
+                
+                let botonesAbrir = document.querySelectorAll("button[onclick*='abrirParteV2']");
+                if (botonesAbrir[index]) {{
+                    botonesAbrir[index].click();
+                    return true;
+                }}
+                return false;
+            }}""", i)
+
+            if not exito:
+                print("   ⚠️ No hay más partes disponibles.")
+                break
+
+            try:
+                await page.locator("button:has-text('VOLVER'), .btn-success:has-text('VOLVER')").first.wait_for(timeout=15000)
+            except:
+                print("   ⚠️ La vista tardó en cargar, esperando unos segundos extra...")
+                await page.wait_for_timeout(3000)
+
+            print("   ➡️ Extrayendo datos del parte...")
+            detalles_parte = await page.evaluate("document.body.innerText;")
+            
+            nombre_archivo = f"parte_detallado_{i + 1}.txt"
+            with open(nombre_archivo, "w", encoding="utf-8") as f:
+                f.write(detalles_parte)
+            print(f"   ✅ Datos guardados con éxito en '{nombre_archivo}'.")
+
+            print("   ➡️ Volviendo a la lista de caducados...")
+            volver_btn = page.locator("button:has-text('VOLVER'), .btn-success:has-text('VOLVER')").first
+            if await volver_btn.count() > 0:
+                await volver_btn.click()
+            else:
+                await page.evaluate("history.back();")
+                
+            await page.wait_for_timeout(3000)
+
+        print("\n🎉 ¡Proceso completado de todos los partes con éxito!")
+        await browser.close()
+
+async def main():
+    while True:
+        try:
+            print("🚀 Iniciando ciclo de revisión en SICI...")
+            await ejecutar_bot()
         except Exception as e:
-            logger.error(f"Error extrayendo contadores: {e}")
-            return contadores
-
-sici = SiciManager()
-
-@app.route("/telegram_webhook", methods=["POST"])
-def webhook():
-    data = request.json or {}
-    if "message" in data:
-        chat = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
-        guardar_usuario(chat)
-
-        if text == "/start":
-            contadores = sici.obtener_datos_panel()
-            tg_send(chat, "🤖 <b>Panel S.I.C.I. Operarios</b>\nSelecciona una opción:", botones_menu(contadores))
-            return jsonify(ok=True)
-
-        if chat in USER_STATE:
-            if USER_STATE[chat] == "ADD_USER":
-                guardar_usuario(text)
-                tg_send(chat, "✅ Usuario añadido.")
-                USER_STATE.pop(chat)
-            elif USER_STATE[chat] == "DEL_USER":
-                eliminar_usuario(text)
-                tg_send(chat, "🗑 Usuario eliminado.")
-                USER_STATE.pop(chat)
-
-    elif "callback_query" in data:
-        cq = data["callback_query"]
-        chat = cq["message"]["chat"]["id"]
-        msg_id = cq["message"]["message_id"]
-        action = cq["data"]
-
-        tg_answer(cq["id"])
-        guardar_usuario(chat)
-
-        if action == "LOGIN":
-            ok = sici.login()
-            contadores = sici.obtener_datos_panel() if ok else None
-            msg = "✅ Sesión iniciada." if ok else "❌ Error en el Login"
-            tg_edit(chat, msg_id, msg, botones_menu(contadores))
-
-        elif action == "REFRESH":
-            contadores = sici.obtener_datos_panel()
-            tg_edit(chat, msg_id, "🔄 <b>Panel Actualizado</b>", botones_menu(contadores))
-
-        elif action == "CITAS":
-            tg_edit(chat, msg_id, "📅 <b>Gestión de Citas</b>", botones_volver())
-
-        elif action == "CADUCADOS":
-            tg_edit(chat, msg_id, "⚠️ <b>Sección Caducados</b>", botones_caducados_submenu())
-
-        elif action == "CAD_PDT_CITA":
-            tg_edit(chat, msg_id, "⚠️ <b>Caducados Pdt. Cita</b>", botones_volver())
-
-        elif action == "CITAS_CAD":
-            tg_edit(chat, msg_id, "🚨 <b>Citas Caducadas</b>", botones_volver())
-
-        elif action == "PENDIENTE_CITA":
-            tg_edit(chat, msg_id, "⏳ <b>Pendiente Cita</b>", botones_volver())
-
-        elif action == "MENSAJES":
-            tg_edit(chat, msg_id, "✉️ <b>Mensajes</b>", botones_volver())
-
-        elif action == "USUARIOS":
-            tg_edit(chat, msg_id, "👥 Gestión de Usuarios", botones_usuarios())
-
-        elif action == "ADD_USER":
-            USER_STATE[chat] = "ADD_USER"
-            tg_send(chat, "Envía el Chat ID:")
-
-        elif action == "DEL_USER":
-            USER_STATE[chat] = "DEL_USER"
-            tg_send(chat, "Envía el Chat ID a eliminar:")
-
-        elif action == "LIST_USERS":
-            usuarios = "\n".join(obtener_usuarios())
-            tg_edit(chat, msg_id, f"📋 <b>Usuarios:</b>\n\n{usuarios}" if usuarios else "Vacío", botones_usuarios())
-
-        elif action == "BACK_MENU":
-            contadores = sici.obtener_datos_panel()
-            tg_edit(chat, msg_id, "🏠 <b>Menú Principal</b>", botones_menu(contadores))
-
-    return jsonify(ok=True)
-
-@app.route("/")
-def nube():
-    if not request.authorization or request.authorization.username != ADMIN_USER or request.authorization.password != ADMIN_PASS:
-        return "Acceso denegado", 401, {"WWW-Authenticate": 'Basic realm="Panel SICI"'}
-    archivos = os.listdir(DATA_DIR)
-    html = """<!doctype html><html><body><h1>☁️ Panel Nube S.I.C.I.</h1>
-    {% for archivo in archivos %}<p>📄 <b>{{archivo}}</b> <a href="/descargar/{{archivo}}">⬇ Descargar</a></p>{% endfor %}
-    </body></html>"""
-    return render_template_string(html, archivos=archivos)
-
-@app.route("/descargar/<nombre>")
-def descargar_archivo(nombre):
-    if not request.authorization or request.authorization.username != ADMIN_USER: return "No autorizado", 401
-    return send_from_directory(DATA_DIR, secure_filename(nombre), as_attachment=True)
+            print(f"❌ Error durante la ejecución: {e}")
+        
+        print("⏳ Esperando 30 minutos para el siguiente ciclo...")
+        await asyncio.sleep(1800) # Se repetirá cada 30 minutos automáticamente
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    asyncio.run(main())
