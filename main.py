@@ -133,6 +133,7 @@ class SiciManager:
 
     def login(self):
         try:
+            # 1. Obtenemos la cookie de sesión inicial de SICI
             r_get = self.session.get(LOGIN_URL, timeout=10)
             soup = BeautifulSoup(r_get.text, "html.parser")
             form = soup.find("form")
@@ -148,13 +149,15 @@ class SiciManager:
                     if name:
                         payload[name] = tag.get("value", "")
 
+            # 2. Inyectamos credenciales exactas
             payload["usuario"] = USUARIO
             payload["contrasenya"] = PASSWORD
             payload["ENTRAR"] = "ENTRAR"
 
-            r = self.session.post(post_url, data=payload, timeout=15, allow_redirects=True)
+            # 3. Enviamos el POST con las cookies de la sesión activa
+            self.session.post(post_url, data=payload, timeout=15, allow_redirects=True)
             
-            # Forzamos comprobación directa en la URL principal
+            # 4. Comprobamos si ya podemos entrar al panel
             test_r = self.session.get(PRINCIPAL_URL, timeout=10)
             if "login" not in test_r.url.lower() and "ENTRAR" not in test_r.text:
                 logger.info("Login en SICI verificado con éxito.")
