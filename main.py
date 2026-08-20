@@ -247,12 +247,19 @@ class SiciManager:
     try:
       r_get = self.session.get(LOGIN_URL, timeout=10)
       soup = BeautifulSoup(r_get.text, "html.parser")
+
       form = soup.find("form")
       payload = {}
       if form:
-        for input_tag in form.find_all("input"):
-          name = input_tag.get("name")
-          value = input_tag.get("value", "")
+        for tag in form.find_all("input"):
+          name = tag.get("name")
+          value = tag.get("value", "")
+          if name:
+            payload[name] = value
+
+        for tag in form.find_all("button"):
+          name = tag.get("name")
+          value = tag.get("value", "ENTRAR")
           if name:
             payload[name] = value
 
@@ -264,7 +271,10 @@ class SiciManager:
           LOGIN_URL, data=payload, timeout=15, allow_redirects=True
       )
 
-      if "principaloperarios.php" in r.url.lower() and "login" not in r.url.lower():
+      if (
+          "principaloperarios.php" in r.url.lower()
+          and "login" not in r.url.lower()
+      ):
         self.current_principal_url = r.url
         logger.info(f"Login en SICI exitoso. URL: {r.url}")
         return True
@@ -275,9 +285,10 @@ class SiciManager:
           and "login" not in test_r.url.lower()
       ):
         self.current_principal_url = test_r.url
-        logger.info(f"Sesión activa detectada. URL: {test_r.url}")
+        logger.info(f"Sesión activa detectada mediante test. URL: {test_r.url}")
         return True
 
+      logger.warning(f"El login no redirigió correctamente. URL actual: {r.url}")
       return False
     except Exception as e:
       logger.error(f"Excepción en login SICI: {e}")
@@ -327,20 +338,15 @@ class SiciManager:
       return contadores
 
   def obtener_partes_caducados_pdt_cita(self):
-    """Extrae los partes de Caducados PDT Cita simulando las peticiones"""
     if not self.verificar_sesion():
       return []
     try:
       r = self.session.get(self.current_principal_url, timeout=15)
       soup = BeautifulSoup(r.text, "html.parser")
-
-      # Buscamos botones o enlaces que lleven al submenú de caducados y pdt cita
-      # Devolvemos una lista simulada o parseada de expedientes encontrados
       partes = []
       for btn in soup.find_all("button"):
         onclick = btn.get("onclick", "")
         if "abrirParteV2" in onclick:
-          # Extraer ID del parte del onclick
           match = re.search(r"idParte['\"]?\s*:\s*['\"]?(\d+)['\"]?", onclick)
           if match:
             id_parte = match.group(1)
